@@ -7,11 +7,11 @@
 
 source("code/0_libraries.R")
 source("code/2_coral_parameters.R")
-source("code/2b_coral_dangerzone.R")
+source("code/2b_risk_zone_functions.R")
 
 # Load both versions
-source("code/3_coral_mse_model.R")  # Original version
-source("code/3_coral_mse_model_IMPROVED.R")  # Improved version
+source("code/3a_mse_model_ORIGINAL.R")  # Original version
+source("code/3_mse_model.R")  # Improved version
 
 cat("========================================\n")
 cat("COMPARING OLD VS. IMPROVED MODELS\n")

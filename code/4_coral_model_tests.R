@@ -6,8 +6,8 @@
 
 source("code/0_libraries.R")
 source("code/2_coral_parameters.R")
-source("code/2b_coral_dangerzone.R")
-source("code/3_coral_mse_model.R")
+source("code/2b_risk_zone_functions.R")
+source("code/3_mse_model.R")
 
 # ============================================================================
 # TEST 1: Compare different monitoring precision levels

@@ -13,7 +13,7 @@
 # ============================================================================
 
 source("code/0_libraries.R")
-source("code/2b_coral_dangerzone.R")
+source("code/2b_risk_zone_functions.R")
 source("code/2_coral_parameters.R")
 
 # ============================================================================
