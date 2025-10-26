@@ -1,0 +1,22 @@
+# R session files
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+Rplots.pdf
+
+# Output files (keep directory structure, exclude generated files)
+output/figures/**/*.pdf
+output/figures/**/*.png
+output/figures/**/*.jpg
+output/tables/**/*.csv
+output/tables/**/*.txt
+output/simulation/**/*.rds
+output/simulation/**/*.csv
+
+# But keep README files
+!output/README.md
+!output/**/README.md
+
+# Keep .gitkeep placeholder files
+!.gitkeep
