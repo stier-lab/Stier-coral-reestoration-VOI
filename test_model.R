@@ -1,7 +1,15 @@
 # Quick test of coral restoration monitoring model
 # Test that the model runs without errors
 
-setwd("/home/user/coral-restoration-monitoring-voi")
+# Set working directory to script location
+if (requireNamespace("here", quietly = TRUE)) {
+  setwd(here::here())
+} else {
+  # Fallback: assume we're in the project root
+  if (!file.exists("code/0_libraries.R")) {
+    stop("Please run this script from the project root directory")
+  }
+}
 
 source("code/0_libraries.R")
 source("code/2_coral_parameters.R")
