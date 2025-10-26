@@ -20,11 +20,18 @@ source("code/2b_risk_zone_functions.R")
 source("code/2_coral_parameters.R")
 
 # ============================================================================
-# FUNCTION: est.NPV.improved
+# FUNCTION: est.NPV
 # ============================================================================
 # Simulates coral restoration with CORRECTED logic and VOI enhancements
 #
-# NEW PARAMETERS:
+# This is the IMPROVED VERSION with critical fixes:
+# 1. Restoration control rule FIXED (more effort when degraded)
+# 2. Restoration amount no longer scales by estimated cover
+# 3. Budget trade-off between monitoring and restoration
+# 4. Decision error tracking (Type I and Type II errors)
+# 5. Process noise increased to make monitoring valuable
+#
+# PARAMETERS:
 #   - total.budget: Total budget for monitoring + restoration
 #   - use_budget_constraint: If TRUE, monitoring costs reduce restoration budget
 #   - track_errors: If TRUE, track Type I and Type II decision errors
@@ -38,7 +45,7 @@ source("code/2_coral_parameters.R")
 #   - error_type2: Times we restored when unnecessary
 # ============================================================================
 
-est.NPV.improved <- function(years, K, A, r, phi.CV.low, phi.CV.high, delta,
+est.NPV <- function(years, K, A, r, phi.CV.low, phi.CV.high, delta,
                              process.noise, v, C.start, C.lim, C.crit, max.R,
                              phi.CV.seed, process.noise.seed, c.restore,
                              total.budget = NULL,  # NEW: Total budget constraint
@@ -301,7 +308,7 @@ calculate.VOI <- function(years, K, A, r, delta, process.noise, v, C.start,
 
   for (i in 1:n.iters) {
     # Perfect information
-    out.perfect <- est.NPV.improved(
+    out.perfect <- est.NPV(
       years, K, A, r,
       phi.CV.low = 0.001, phi.CV.high = 0.001,
       delta, process.noise, v, C.start, C.lim, C.crit, max.R,
@@ -313,7 +320,7 @@ calculate.VOI <- function(years, K, A, r, delta, process.noise, v, C.start,
     errors.perfect[i] <- out.perfect$error.cost.total
 
     # High precision
-    out.high <- est.NPV.improved(
+    out.high <- est.NPV(
       years, K, A, r,
       phi.CV.low = 0.1, phi.CV.high = 0.1,
       delta, process.noise, v, C.start, C.lim, C.crit, max.R,
@@ -325,7 +332,7 @@ calculate.VOI <- function(years, K, A, r, delta, process.noise, v, C.start,
     errors.high[i] <- out.high$error.cost.total
 
     # Low precision
-    out.low <- est.NPV.improved(
+    out.low <- est.NPV(
       years, K, A, r,
       phi.CV.low = 0.5, phi.CV.high = 0.5,
       delta, process.noise, v, C.start, C.lim, C.crit, max.R,
@@ -392,7 +399,7 @@ source("code/2_coral_parameters.R")
 process.noise <- 0.1  # 10% SD in growth rate
 
 # Test single run
-test_improved <- est.NPV.improved(
+test_improved <- est.NPV(
   years = 50,
   K = K.coral,
   A = A.coral,
@@ -433,3 +440,102 @@ cat("2. Restoration amount no longer scales by estimate\n")
 cat("3. Budget trade-off implemented\n")
 cat("4. Decision errors tracked\n")
 cat("5. Process noise increased to", process.noise, "\n")
+
+# ============================================================================
+# FUNCTION: repeat.model2
+# ============================================================================
+# Runs Monte Carlo simulations with est.NPV
+# Useful for exploring parameter uncertainty and model behavior
+# ============================================================================
+
+repeat.model2 <- function(n.iters, C.start, C.lim, years, K, A, r, phi.CV,
+                          delta, process.noise, v, max.R, phi.seeds, process.seeds,
+                          c.restore = 500){  # Add c.restore parameter with default
+
+  # Calculate Cmsy for later use
+  Cmsy <- A/3 + K/3 + (A^2 - A*K + K^2)^(1/2)/3
+  C.crit <- max(A, 0.8 * Cmsy)
+  
+  # Store input phi.CV parameter before creating result vectors
+  phi.CV.input <- phi.CV
+
+  # Initialize result vectors
+  value <- rep(NA, n.iters)
+  BB <- rep(NA, n.iters)
+  TP <- rep(NA, n.iters)
+  TPCMSY <- rep(NA, n.iters)
+  dC <- rep(NA, n.iters)
+  C <- rep(NA, n.iters)
+  ES <- rep(NA, n.iters)
+  phi.CV.result <- rep(NA, n.iters)  # Renamed to avoid conflict with input parameter
+  cost.monitor <- rep(NA, n.iters)
+  NPV_minusCM <- rep(NA, n.iters)
+  pRmax <- rep(NA, n.iters)
+
+  phi.CV.seed.save <- rep(NA, n.iters)
+  thresh2 <- thresh1 <- rep(NA, n.iters)
+  rescue <- rep(NA, n.iters)
+  rescue_prob <- rep(NA, n.iters)
+  dangers <- rep(NA, n.iters)
+
+  # Run simulation n.iters times
+  for (i in 1:n.iters){
+
+    phi.CV.seed <- phi.seeds[i]
+    process.noise.seed <- process.seeds[i]
+    phi.CV.seed.save[i] <- phi.CV.seed
+
+    # Determine phi.CV values (handle both single value and separate low/high)
+    if (length(phi.CV.input) == 1) {
+      phi.CV.low <- phi.CV.high <- phi.CV.input
+    } else {
+      phi.CV.low <- phi.CV.input[1]
+      phi.CV.high <- phi.CV.input[2]
+    }
+
+    # Run single simulation
+    model.output <- est.NPV(years, K, A, r, phi.CV.low, phi.CV.high, delta,
+                            process.noise, v, C.start, C.lim, C.crit, max.R,
+                            phi.CV.seed, process.noise.seed, c.restore,
+                            use_budget_constraint = FALSE, track_errors = FALSE)
+
+    # Extract results
+    value[i] <- model.output$NPV
+    BB[i] <- model.output$BB
+    TP[i] <- model.output$TP
+    TPCMSY[i] <- model.output$TPCMSY
+    dC[i] <- median(abs(model.output$C / model.output$Chat))
+    C[i] <- mean(model.output$C)
+
+    thresh1[i] <- coral_dangerzone(C.vec = model.output$C, A = A, thresh = 0.8 * Cmsy)
+    thresh2[i] <- coral_dangerzone(C.vec = model.output$C, A = A, thresh = 0.8 * Cmsy)
+    rescue[i] <- length(which(model.output$C < 0.8 * Cmsy & model.output$C > A))
+    rescue_prob[i] <- model.output$rescue_prob
+    dangers[i] <- length(which(model.output$C > 0.8 * Cmsy))
+
+    ES[i] <- median(model.output$ES)
+    phi.CV.result[i] <- mean(model.output$phi.CV, na.rm = T)
+    cost.monitor[i] <- model.output$cost.monitor
+    NPV_minusCM[i] <- model.output$NPV - model.output$cost.monitor
+    pRmax[i] <- max(model.output$pR)
+  }
+
+  return(list(
+    value = value,
+    BB = BB,
+    TP = TP,
+    TPCMSY = TPCMSY,
+    dC = dC,
+    C = C,
+    ES = ES,
+    phi.CV = phi.CV.result,
+    cost.monitor = cost.monitor,
+    NPV_minusCM = NPV_minusCM,
+    pRmax = pRmax,
+    thresh1 = thresh1,
+    thresh2 = thresh2,
+    rescue = rescue,
+    rescue_prob = rescue_prob,
+    dangers = dangers
+  ))
+}

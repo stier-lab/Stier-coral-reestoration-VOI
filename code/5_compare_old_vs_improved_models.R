@@ -59,7 +59,7 @@ for (cover in cover.levels) {
   )
 
   # IMPROVED MODEL
-  test.new <- est.NPV.improved(
+  test.new <- est.NPV(
     years = 5,
     K = K.coral, A = A, r = r.coral,
     phi.CV.low = 0.1, phi.CV.high = 0.1,
@@ -120,13 +120,13 @@ for (i in 1:n.iters) {
 # IMPROVED MODEL: High vs Low precision
 npv.new.high <- npv.new.low <- rep(NA, n.iters)
 for (i in 1:n.iters) {
-  out.high <- est.NPV.improved(years, K.coral, A, r.coral, 0.1, 0.1, 0.05,
+  out.high <- est.NPV(years, K.coral, A, r.coral, 0.1, 0.1, 0.05,
                                 process.noise.new, v, C.start, Cmsy, C.crit, max.R,
                                 phi.seeds[i], process.seeds[i], c.restore,
                                 use_budget_constraint = FALSE, track_errors = FALSE)
   npv.new.high[i] <- out.high$NPV
 
-  out.low <- est.NPV.improved(years, K.coral, A, r.coral, 0.5, 0.5, 0.05,
+  out.low <- est.NPV(years, K.coral, A, r.coral, 0.5, 0.5, 0.05,
                                process.noise.new, v, C.start, Cmsy, C.crit, max.R,
                                phi.seeds[i], process.seeds[i], c.restore,
                                use_budget_constraint = FALSE, track_errors = FALSE)
@@ -154,7 +154,7 @@ cat("---------------------------------------------------------\n")
 total.budget <- 12000
 
 # Improved model WITH budget constraint
-out.budget <- est.NPV.improved(
+out.budget <- est.NPV(
   years = 50, K = K.coral, A = A, r = r.coral,
   phi.CV.low = 0.1, phi.CV.high = 0.5,  # Adaptive monitoring
   delta = 0.05, process.noise = 0.1,
@@ -168,7 +168,7 @@ out.budget <- est.NPV.improved(
 )
 
 # Improved model WITHOUT budget constraint
-out.no.budget <- est.NPV.improved(
+out.no.budget <- est.NPV(
   years = 50, K = K.coral, A = A, r = r.coral,
   phi.CV.low = 0.1, phi.CV.high = 0.5,
   delta = 0.05, process.noise = 0.1,
@@ -212,7 +212,7 @@ cat(sprintf("  Total cost of errors:                       $%.2f\n",
             out.budget$error.cost.total))
 
 # Compare with low precision
-out.low.precision <- est.NPV.improved(
+out.low.precision <- est.NPV(
   years = 50, K = K.coral, A = A, r = r.coral,
   phi.CV.low = 0.5, phi.CV.high = 0.5,  # Always low precision
   delta = 0.05, process.noise = 0.1,
@@ -247,7 +247,7 @@ par(mfrow = c(2, 2))
 # Plot 1: Restoration effort comparison (OLD vs NEW)
 test.old.viz <- est.NPV(years, K.coral, A, r.coral, 0.1, 0.1, 0.05, 0,
                         v, 60, Cmsy, C.crit, max.R, 12345, 67890, c.restore)
-test.new.viz <- est.NPV.improved(years, K.coral, A, r.coral, 0.1, 0.1, 0.05, 0.1,
+test.new.viz <- est.NPV(years, K.coral, A, r.coral, 0.1, 0.1, 0.05, 0.1,
                                   v, 60, Cmsy, C.crit, max.R, 12345, 67890, c.restore,
                                   use_budget_constraint = FALSE, track_errors = FALSE)
 
