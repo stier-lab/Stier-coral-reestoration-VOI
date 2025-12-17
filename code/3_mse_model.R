@@ -1,76 +1,105 @@
 # ============================================================================
-# CORAL RESTORATION MSE MODEL - IMPROVED VERSION
+# SIZE-STRUCTURED CORAL RESTORATION MSE MODEL
 # ============================================================================
-# Management Strategy Evaluation for coral restoration monitoring
+# Management Strategy Evaluation using Integral Projection Model framework
 #
-# IMPROVEMENTS IN THIS VERSION:
-# 1. FIXED: Restoration control rule now applies MORE effort when coral is degraded
-# 2. FIXED: Restoration amount no longer scales by estimated cover
-# 3. NEW: Budget trade-off between monitoring and restoration
-# 4. NEW: Perfect information benchmark for VOI quantification
-# 5. NEW: Increased process noise to make monitoring valuable
-# 6. NEW: Cost of decision errors explicitly tracked
+# KEY FEATURES:
+# 1. Individual colony tracking (size-structured)
+# 2. Size-dependent vital rates (survival, growth, fecundity)
+# 3. Density-dependent recruitment
+# 4. Stochastic disturbances with size-dependent vulnerability
+# 5. Restoration as colony outplanting (with size distribution)
+# 6. Monitoring precision affects size estimates
+# 7. VOI from better size assessments → better restoration decisions
 #
-# Key question: Is precise monitoring worth the cost, or should we
-# invest those resources in restoration action instead?
+# Following standard coral ecology literature:
+# - Kayal et al. (2018) - Moorea coral IPM
+# - Edmunds & Elahi (2007) - Size-structured dynamics
 # ============================================================================
 
 source("code/0_libraries.R")
-source("code/2b_risk_zone_functions.R")
 source("code/2_coral_parameters.R")
+source("code/1_coral_operating_model.R")  # Size-structured IPM functions
 
 # ============================================================================
-# FUNCTION: est.NPV
+# FUNCTION: est.NPV.size.structured
 # ============================================================================
-# Simulates coral restoration with CORRECTED logic and VOI enhancements
-#
-# This is the IMPROVED VERSION with critical fixes:
-# 1. Restoration control rule FIXED (more effort when degraded)
-# 2. Restoration amount no longer scales by estimated cover
-# 3. Budget trade-off between monitoring and restoration
-# 4. Decision error tracking (Type I and Type II errors)
-# 5. Process noise increased to make monitoring valuable
+# Simulates coral restoration with size-structured population dynamics
 #
 # PARAMETERS:
-#   - total.budget: Total budget for monitoring + restoration
-#   - use_budget_constraint: If TRUE, monitoring costs reduce restoration budget
-#   - track_errors: If TRUE, track Type I and Type II decision errors
+#   - years: Simulation length
+#   - area.m2: Reef area surveyed (m²)
+#   - C.start: Starting coral cover (%)
+#   - C.target: Target cover for restoration decisions
+#   - max.R.cover: Maximum restoration (% cover per year)
+#   - outplant.size.mean: Mean size of outplanted colonies (cm)
+#   - outplant.size.sd: SD of outplant sizes
+#   - phi.CV.low/high: Monitoring precision (CV)
+#   - delta: Discount rate
+#   - v: Ecosystem value per % cover per year
+#   - c.restore: Cost per % cover restored
+#   - phi.CV.seed: Random seed for monitoring error
+#   - dynamics.seed: Random seed for population dynamics
+#   - total.budget: Total annual budget
+#   - use_budget_constraint: Budget trade-off enabled
+#   - track_errors: Track decision errors
 #
-# Returns (in addition to original outputs):
-#   - NPV_no_monitoring_cost: NPV before subtracting monitoring costs
-#   - restoration_budget_used: Actual restoration budget used
-#   - monitoring_budget_used: Actual monitoring budget used
-#   - decision_errors: Cost of making wrong decisions
-#   - error_type1: Times we should have restored but didn't
-#   - error_type2: Times we restored when unnecessary
+# Returns:
+#   - NPV: Net present value
+#   - C.vec: True cover trajectory
+#   - Chat.vec: Estimated cover
+#   - sizes.final: Final size distribution
+#   - Decision error metrics
 # ============================================================================
 
-est.NPV <- function(years, K, A, r, phi.CV.low, phi.CV.high, delta,
-                             process.noise, v, C.start, C.lim, C.crit, max.R,
-                             phi.CV.seed, process.noise.seed, c.restore,
-                             total.budget = NULL,  # NEW: Total budget constraint
-                             use_budget_constraint = FALSE,  # NEW: Enable budget trade-off
-                             track_errors = TRUE) {  # NEW: Track decision errors
+est.NPV.size.structured <- function(years,
+                                    area.m2 = 100,
+                                    C.start,
+                                    C.target,
+                                    max.R.cover,
+                                    outplant.size.mean = 8,
+                                    outplant.size.sd = 3,
+                                    phi.CV.low,
+                                    phi.CV.high,
+                                    delta,
+                                    v,
+                                    c.restore,
+                                    phi.CV.seed,
+                                    dynamics.seed,
+                                    total.budget = NULL,
+                                    use_budget_constraint = FALSE,
+                                    track_errors = TRUE,
+                                    # IPM parameters
+                                    survival.params = list(intercept = -1.5, slope = 0.8),
+                                    growth.params = list(intercept = 0.8, slope = 0.9, sigma = 0.3),
+                                    fecundity.params = list(polyps.per.cm2 = 10, eggs.per.polyp = 5),
+                                    recruitment.params = list(intercept = 2.0, slope = 0.05),
+                                    mortality.event.prob = 0.15,
+                                    mortality.event.magnitude = 0.35,
+                                    baseline.mortality = 0.05) {
 
-  # Calculate reference points given parameters
-  Cmsy <- A/3 + K/3 + (A^2 - A*K + K^2)^(1/2)/3
-  MGR <- r * Cmsy * (1 - Cmsy/K) * (Cmsy/K - A/K)  # Maximum growth rate
-  Rmsy <- MGR / Cmsy
+  # Initialize population from starting cover
+  set.seed(dynamics.seed)
+  sizes <- cover.to.sizes(C.start, area.m2 = area.m2)
 
-  # Initialize vectors
-  C.vec <- rep(NA, years)        # True coral cover
+  # Initialize tracking vectors
+  C.vec <- rep(NA, years + 1)
   C.vec[1] <- C.start
-  Chat.vec <- rep(NA, years)     # Estimated coral cover
+  Chat.vec <- rep(NA, years + 1)
   Chat.vec[1] <- C.start
-  ES.vec <- rep(NA, years)       # Ecosystem service value
-  R.vec <- rep(NA, years)        # Restoration effort (actual)
-  R.desired.vec <- rep(NA, years)  # Restoration effort (desired, before budget limit)
-  phi.CV <- rep(NA, years)       # Monitoring precision
-  monitoring.cost.vec <- rep(NA, years)  # Annual monitoring cost
+  ES.vec <- rep(NA, years)
+  R.vec <- rep(NA, years)  # Restoration as % cover
+  R.desired.vec <- rep(NA, years)
+  phi.CV.vec <- rep(NA, years)
+  monitoring.cost.vec <- rep(NA, years)
+  n.colonies.vec <- rep(NA, years + 1)
+  n.colonies.vec[1] <- length(sizes)
+  mean.size.vec <- rep(NA, years + 1)
+  mean.size.vec[1] <- mean(sizes)
 
-  # NEW: Error tracking
-  error_type1.vec <- rep(0, years)  # Should restore but don't (underestimate)
-  error_type2.vec <- rep(0, years)  # Restore when unnecessary (overestimate)
+  # Error tracking
+  error_type1.vec <- rep(0, years)
+  error_type2.vec <- rep(0, years)
   cost_error_type1.vec <- rep(0, years)
   cost_error_type2.vec <- rep(0, years)
 
@@ -79,116 +108,120 @@ est.NPV <- function(years, K, A, r, phi.CV.low, phi.CV.high, delta,
   C.errors.low <- exp(rnorm(years, mean = (0 - phi.CV.low^2/2), sd = phi.CV.low))
   C.errors.high <- exp(rnorm(years, mean = (0 - phi.CV.high^2/2), sd = phi.CV.high))
 
-  # Generate process errors (INCREASED from 0 to make monitoring valuable)
-  set.seed(process.noise.seed)
-  process.errors <- rnorm(years, mean = 0, sd = process.noise)
-
   # ============================================================================
   # SIMULATION LOOP
   # ============================================================================
 
-  for (i in 1:years){
+  for (i in 1:years) {
 
     # ------------------------------------------------------------------------
-    # SAMPLING MODEL: Determine monitoring precision for this year
+    # SAMPLING MODEL: Monitoring precision
     # ------------------------------------------------------------------------
-    # Adaptive monitoring: high precision when near danger zone
-    current.phi.CV <- ifelse(Chat.vec[i] < C.crit, phi.CV.low, phi.CV.high)
-    phi.CV[i] <- current.phi.CV
+    current.phi.CV <- ifelse(Chat.vec[i] < C.target, phi.CV.low, phi.CV.high)
+    phi.CV.vec[i] <- current.phi.CV
 
-    # Calculate monitoring cost for this year
+    # Monitoring cost
     monitoring.cost.vec[i] <- ci * exp(-cs * current.phi.CV)
 
     # ------------------------------------------------------------------------
-    # BUDGET CONSTRAINT (if enabled)
+    # BUDGET CONSTRAINT
     # ------------------------------------------------------------------------
     if (use_budget_constraint && !is.null(total.budget)) {
       budget_for_restoration <- total.budget - monitoring.cost.vec[i]
     } else {
-      budget_for_restoration <- Inf  # No budget constraint
+      budget_for_restoration <- Inf
     }
 
     # ------------------------------------------------------------------------
-    # MANAGEMENT MODEL: Determine restoration effort based on estimated cover
-    # FIXED: Now applies MORE restoration when coral is degraded!
+    # MANAGEMENT MODEL: Restoration decision based on estimated cover
     # ------------------------------------------------------------------------
 
-    # CORRECTED CONTROL RULE:
-    # - No restoration if healthy (> Cmsy)
-    # - Increasing restoration as coral degrades (Cmsy to C.lim)
-    # - Maximum restoration if critically low (< C.lim)
+    if (Chat.vec[i] >= C.target) {
+      R.desired.cover <- 0
 
-    if (Chat.vec[i] >= Cmsy) {
-      R.desired <- 0  # No restoration needed when healthy
-
-    } else if (Chat.vec[i] > C.lim) {
-      # Linear increase in restoration as cover decreases
-      # R increases from 0 at Cmsy to max.R at C.lim
-      R.desired <- max.R * (Cmsy - Chat.vec[i]) / (Cmsy - C.lim)
+    } else if (Chat.vec[i] > 0.5 * C.target) {
+      # Linear increase
+      R.desired.cover <- max.R.cover * (C.target - Chat.vec[i]) / (0.5 * C.target)
 
     } else {
-      # Emergency restoration when critically low
-      R.desired <- max.R * 1.5  # 150% of max for critical situations
+      # Emergency restoration
+      R.desired.cover <- max.R.cover * 1.5
     }
 
-    R.desired.vec[i] <- R.desired
+    R.desired.vec[i] <- R.desired.cover
 
     # Apply budget constraint
     if (use_budget_constraint && !is.null(total.budget)) {
-      R.actual <- min(R.desired, budget_for_restoration / c.restore)
+      R.actual.cover <- min(R.desired.cover, budget_for_restoration / c.restore)
     } else {
-      R.actual <- R.desired
+      R.actual.cover <- R.desired.cover
     }
 
-    R.vec[i] <- R.actual
+    R.vec[i] <- R.actual.cover
 
     # ------------------------------------------------------------------------
-    # TRACK DECISION ERRORS (if enabled)
+    # TRACK DECISION ERRORS
     # ------------------------------------------------------------------------
     if (track_errors) {
-      # What SHOULD we do based on TRUE coral cover?
-      should_restore <- C.vec[i] < Cmsy
-      did_restore <- R.actual > 0.01  # Small threshold to account for rounding
+      should_restore <- C.vec[i] < C.target
+      did_restore <- R.actual.cover > 0.01
 
-      # Type I error: Should restore but don't (dangerous!)
       if (should_restore && !did_restore) {
         error_type1.vec[i] <- 1
-        # Cost: Lost ecosystem services from degraded state
-        cost_error_type1.vec[i] <- v * (Cmsy - C.vec[i])
+        cost_error_type1.vec[i] <- v * (C.target - C.vec[i])
       }
 
-      # Type II error: Restore when unnecessary (wasteful!)
       if (!should_restore && did_restore) {
         error_type2.vec[i] <- 1
-        # Cost: Wasted restoration funds
-        cost_error_type2.vec[i] <- R.actual * c.restore
+        cost_error_type2.vec[i] <- R.actual.cover * c.restore
       }
     }
 
-    # Ecosystem service value (proportional to TRUE coral cover)
+    # Ecosystem services (from TRUE cover)
     ES.vec[i] <- v * C.vec[i]
 
     # ------------------------------------------------------------------------
-    # OPERATING MODEL: True coral population dynamics
-    # FIXED: Restoration no longer scales by Chat!
+    # RESTORATION: Generate outplant colonies
     # ------------------------------------------------------------------------
-    # Natural dynamics: logistic growth with Allee effect + process noise
-    production <- r * (1 - C.vec[i]/K) * (C.vec[i]/K - A/K) + process.errors[i]
-
-    # CORRECTED: Restoration is a FIXED amount, not scaled by estimates
-    # This makes monitoring accuracy matter for DECISIONS, not for amount added
-    C.vec[i+1] <- max(0.1, C.vec[i] + C.vec[i] * production + R.actual)
-
-    # Alternative formulation (if restoration success depends on substrate availability):
-    # C.vec[i+1] <- max(0.1, C.vec[i] + C.vec[i] * production + R.actual * (C.vec[i]/K))
+    restoration.sizes <- NULL
+    if (R.actual.cover > 0) {
+      # Convert % cover to colony sizes
+      restoration.sizes <- cover.to.sizes(
+        cover.percent = R.actual.cover,
+        area.m2 = area.m2,
+        mean.size = outplant.size.mean,
+        sd.size = outplant.size.sd
+      )
+    }
 
     # ------------------------------------------------------------------------
-    # OBSERVATION MODEL: Get new estimate for next year
+    # OPERATING MODEL: Size-structured dynamics
     # ------------------------------------------------------------------------
-    # Determine which error to use based on CURRENT monitoring precision
+    result <- coral.dynamics.size.structured(
+      sizes.cm = sizes,
+      area.m2 = area.m2,
+      survival.params = survival.params,
+      growth.params = growth.params,
+      fecundity.params = fecundity.params,
+      recruitment.params = recruitment.params,
+      mortality.event.prob = mortality.event.prob,
+      mortality.event.magnitude = mortality.event.magnitude,
+      baseline.mortality = baseline.mortality,
+      restoration.sizes = restoration.sizes
+    )
+
+    # Update population
+    sizes <- result$sizes
+    C.vec[i+1] <- result$cover.percent
+    n.colonies.vec[i+1] <- result$n.colonies
+    mean.size.vec[i+1] <- result$mean.size
+
+    # ------------------------------------------------------------------------
+    # OBSERVATION MODEL: Estimate cover with error
+    # ------------------------------------------------------------------------
     C.error <- ifelse(current.phi.CV == phi.CV.low,
-                      C.errors.low[i],
-                      C.errors.high[i])
+                     C.errors.low[i],
+                     C.errors.high[i])
 
     Chat.vec[i+1] <- C.vec[i+1] * C.error
   }
@@ -197,32 +230,21 @@ est.NPV <- function(years, K, A, r, phi.CV.low, phi.CV.high, delta,
   # CALCULATE PERFORMANCE METRICS
   # ============================================================================
 
-  # RESCUE PROBABILITY: Recovery from near-collapse events
-  temp_mat <- matrix(NA, nrow = length(C.vec) + 1, ncol = 2)
-  threshold <- 0.8 * Cmsy
+  # RESCUE PROBABILITY
+  temp_mat <- matrix(NA, nrow = length(C.vec), ncol = 2)
+  threshold <- 0.8 * C.target
 
-  for(j in 1:length(C.vec)){
-    # Number of times recovered above threshold
+  for(j in 1:(length(C.vec)-1)){
     temp_mat[j+1, 1] <- ifelse(C.vec[j+1] > threshold & C.vec[j] < threshold, 1, 0)
-    # Number of times dipped below threshold
     temp_mat[j+1, 2] <- ifelse(C.vec[j+1] < threshold & C.vec[j] > threshold, 1, 0)
   }
 
   # ECONOMIC METRICS
-  # Cost of restoration
   restoration.cost.vec <- R.vec * c.restore
-
-  # Net value each year: Ecosystem services - Restoration costs
   Value <- ES.vec - restoration.cost.vec
-
-  # Discount to present value
   discount.vec <- 1 / ((1 + delta)^seq(0, (years - 1)))
   NPV_no_monitoring_cost <- sum(Value * discount.vec)
-
-  # Total monitoring cost (discounted)
   total.monitoring.cost <- sum(monitoring.cost.vec * discount.vec)
-
-  # Final NPV (ecosystem services - restoration costs - monitoring costs)
   NPV <- NPV_no_monitoring_cost - total.monitoring.cost
 
   # STABILITY METRICS
@@ -230,21 +252,21 @@ est.NPV <- function(years, K, A, r, phi.CV.low, phi.CV.high, delta,
             length(which(C.vec >= (2.25 * median(C.vec))))) / length(C.vec)
 
   # COLLAPSE METRICS
-  TP <- ifelse(C.vec[years] > A, 0, 1)  # Did coral collapse below Allee threshold?
-  TPCMSY <- ifelse(C.vec[years] > (0.25 * Cmsy), 0, 1)  # Below 25% of optimal?
+  TP <- ifelse(C.vec[years+1] > 0.1 * 60, 0, 1)  # Below 10% of typical K
+  TPCMSY <- ifelse(C.vec[years+1] > (0.5 * C.target), 0, 1)
 
   # RECOVERY METRICS
-  rescue <- colSums(temp_mat, na.rm = T)[1]  # Number of recoveries
+  rescue <- colSums(temp_mat, na.rm = T)[1]
   rescue_prob <- colSums(temp_mat, na.rm = T)[1] / colSums(temp_mat, na.rm = T)[2]
-  dangers <- colSums(temp_mat, na.rm = T)[2]  # Number of danger events
+  dangers <- colSums(temp_mat, na.rm = T)[2]
 
-  # DECISION ERROR METRICS (discounted)
+  # DECISION ERROR METRICS
   total.error.type1 <- sum(error_type1.vec)
   total.error.type2 <- sum(error_type2.vec)
   total.cost.errors <- sum((cost_error_type1.vec + cost_error_type2.vec) * discount.vec)
 
   return(list(
-    # Original outputs
+    # Core outputs
     NPV = NPV,
     ES = ES.vec,
     C = C.vec,
@@ -252,17 +274,17 @@ est.NPV <- function(years, K, A, r, phi.CV.low, phi.CV.high, delta,
     BB = BB,
     TP = TP,
     TPCMSY = TPCMSY,
-    phi.CV = phi.CV,
+    phi.CV = phi.CV.vec,
     cost.monitor = total.monitoring.cost,
     pR = R.vec,
     rescue = rescue,
     rescue_prob = rescue_prob,
     dangers = dangers,
 
-    # NEW outputs for VOI analysis
+    # Economic outputs
     NPV_no_monitoring_cost = NPV_no_monitoring_cost,
-    R.desired = R.desired.vec,  # What we wanted to do
-    R.actual = R.vec,  # What we actually did (after budget constraint)
+    R.desired = R.desired.vec,
+    R.actual = R.vec,
     monitoring.cost.annual = monitoring.cost.vec,
     restoration.cost.total = sum(restoration.cost.vec),
 
@@ -273,26 +295,26 @@ est.NPV <- function(years, K, A, r, phi.CV.low, phi.CV.high, delta,
     error.type1.vec = error_type1.vec,
     error.type2.vec = error_type2.vec,
 
-    # For debugging/analysis
-    Cmsy = Cmsy,
-    Rmsy = Rmsy
+    # Size structure outputs
+    sizes.final = sizes,
+    n.colonies = n.colonies.vec,
+    mean.size = mean.size.vec,
+
+    # Reference points
+    C.target = C.target
   ))
 }
 
 # ============================================================================
-# HELPER FUNCTION: Calculate VOI with perfect information benchmark
+# HELPER FUNCTION: Calculate VOI with size structure
 # ============================================================================
 
-calculate.VOI <- function(years, K, A, r, delta, process.noise, v, C.start,
-                          C.lim, C.crit, max.R, phi.seeds, process.seeds,
-                          c.restore, n.iters = 100,
-                          total.budget = NULL,
-                          use_budget_constraint = FALSE) {
-
-  # Run three scenarios:
-  # 1. Perfect information (CV = 0.001, very small to avoid division by zero)
-  # 2. High precision (CV = 0.1)
-  # 3. Low precision (CV = 0.5)
+calculate.VOI.size.structured <- function(years, area.m2, C.start, C.target,
+                                         max.R.cover, delta, v, c.restore,
+                                         phi.seeds, dynamics.seeds,
+                                         n.iters = 100,
+                                         total.budget = NULL,
+                                         use_budget_constraint = FALSE) {
 
   results.perfect <- rep(NA, n.iters)
   results.high <- rep(NA, n.iters)
@@ -308,11 +330,11 @@ calculate.VOI <- function(years, K, A, r, delta, process.noise, v, C.start,
 
   for (i in 1:n.iters) {
     # Perfect information
-    out.perfect <- est.NPV(
-      years, K, A, r,
+    out.perfect <- est.NPV.size.structured(
+      years, area.m2, C.start, C.target, max.R.cover,
       phi.CV.low = 0.001, phi.CV.high = 0.001,
-      delta, process.noise, v, C.start, C.lim, C.crit, max.R,
-      phi.seeds[i], process.seeds[i], c.restore,
+      delta, v, c.restore,
+      phi.seeds[i], dynamics.seeds[i],
       total.budget, use_budget_constraint, track_errors = TRUE
     )
     results.perfect[i] <- out.perfect$NPV
@@ -320,11 +342,11 @@ calculate.VOI <- function(years, K, A, r, delta, process.noise, v, C.start,
     errors.perfect[i] <- out.perfect$error.cost.total
 
     # High precision
-    out.high <- est.NPV(
-      years, K, A, r,
+    out.high <- est.NPV.size.structured(
+      years, area.m2, C.start, C.target, max.R.cover,
       phi.CV.low = 0.1, phi.CV.high = 0.1,
-      delta, process.noise, v, C.start, C.lim, C.crit, max.R,
-      phi.seeds[i], process.seeds[i], c.restore,
+      delta, v, c.restore,
+      phi.seeds[i], dynamics.seeds[i],
       total.budget, use_budget_constraint, track_errors = TRUE
     )
     results.high[i] <- out.high$NPV
@@ -332,11 +354,11 @@ calculate.VOI <- function(years, K, A, r, delta, process.noise, v, C.start,
     errors.high[i] <- out.high$error.cost.total
 
     # Low precision
-    out.low <- est.NPV(
-      years, K, A, r,
+    out.low <- est.NPV.size.structured(
+      years, area.m2, C.start, C.target, max.R.cover,
       phi.CV.low = 0.5, phi.CV.high = 0.5,
-      delta, process.noise, v, C.start, C.lim, C.crit, max.R,
-      phi.seeds[i], process.seeds[i], c.restore,
+      delta, v, c.restore,
+      phi.seeds[i], dynamics.seeds[i],
       total.budget, use_budget_constraint, track_errors = TRUE
     )
     results.low[i] <- out.low$NPV
@@ -349,12 +371,10 @@ calculate.VOI <- function(years, K, A, r, delta, process.noise, v, C.start,
   NPV.high <- median(results.high)
   NPV.low <- median(results.low)
 
-  # Value of Information calculations
   VOI.current <- (NPV.high - NPV.low) - (median(cost.high) - median(cost.low))
   VOI.potential <- (NPV.perfect - NPV.low) - (median(cost.perfect) - median(cost.low))
   VOI.efficiency <- ifelse(VOI.potential > 0, VOI.current / VOI.potential, NA)
 
-  # Cost of errors
   error.reduction.high.vs.low <- median(errors.low) - median(errors.high)
   error.reduction.perfect.vs.low <- median(errors.low) - median(errors.perfect)
 
@@ -391,151 +411,53 @@ calculate.VOI <- function(years, K, A, r, delta, process.noise, v, C.start,
 # EXAMPLE USAGE
 # ============================================================================
 
-cat("Testing IMPROVED coral restoration model...\n\n")
+cat("Testing SIZE-STRUCTURED coral restoration MSE model...\n\n")
 
 source("code/2_coral_parameters.R")
 
-# Increase process noise to make monitoring valuable
-process.noise <- 0.1  # 10% SD in growth rate
-
 # Test single run
-test_improved <- est.NPV(
+test_size_structured <- est.NPV.size.structured(
   years = 50,
-  K = K.coral,
-  A = A.coral,
-  r = r.coral,
+  area.m2 = 100,
+  C.start = 30,
+  C.target = 35,
+  max.R.cover = 5.0,
+  outplant.size.mean = 8,
+  outplant.size.sd = 3,
   phi.CV.low = 0.1,
   phi.CV.high = 0.5,
   delta = 0.05,
-  process.noise = process.noise,
-  v = 100,
-  C.start = 75,
-  C.lim = Cmsy,
-  C.crit = C.crit,
-  max.R = max.R,
-  phi.CV.seed = 12345,
-  process.noise.seed = 67890,
+  v = v,
   c.restore = c.restore,
-  total.budget = 15000,  # NEW: Budget constraint
-  use_budget_constraint = TRUE,  # NEW: Enable trade-off
+  phi.CV.seed = 12345,
+  dynamics.seed = 67890,
+  total.budget = 15000,
+  use_budget_constraint = TRUE,
   track_errors = TRUE
 )
 
-cat("IMPROVED MODEL RESULTS:\n")
-cat("======================\n")
-cat("NPV:", round(test_improved$NPV, 2), "\n")
-cat("NPV (before monitoring cost):", round(test_improved$NPV_no_monitoring_cost, 2), "\n")
-cat("Monitoring cost:", round(test_improved$cost.monitor, 2), "\n")
-cat("Restoration cost:", round(test_improved$restoration.cost.total, 2), "\n")
-cat("Type I errors (should restore but didn't):", test_improved$error.type1.count, "\n")
-cat("Type II errors (restored unnecessarily):", test_improved$error.type2.count, "\n")
-cat("Total cost of errors:", round(test_improved$error.cost.total, 2), "\n")
-cat("Final coral cover:", round(test_improved$C[length(test_improved$C)], 2), "%\n")
-cat("Collapsed:", test_improved$TP, "\n")
+cat("SIZE-STRUCTURED MSE MODEL RESULTS:\n")
+cat("===================================\n")
+cat("NPV:", round(test_size_structured$NPV, 2), "\n")
+cat("NPV (before monitoring cost):", round(test_size_structured$NPV_no_monitoring_cost, 2), "\n")
+cat("Monitoring cost:", round(test_size_structured$cost.monitor, 2), "\n")
+cat("Restoration cost:", round(test_size_structured$restoration.cost.total, 2), "\n")
+cat("Type I errors (should restore but didn't):", test_size_structured$error.type1.count, "\n")
+cat("Type II errors (restored unnecessarily):", test_size_structured$error.type2.count, "\n")
+cat("Total cost of errors:", round(test_size_structured$error.cost.total, 2), "\n")
+cat("Final coral cover:", round(test_size_structured$C[length(test_size_structured$C)], 2), "%\n")
+cat("Final number of colonies:", test_size_structured$n.colonies[length(test_size_structured$n.colonies)], "\n")
+cat("Final mean colony size:", round(test_size_structured$mean.size[length(test_size_structured$mean.size)], 2), "cm\n")
+cat("Collapsed:", test_size_structured$TP, "\n")
 
-cat("\n✓ Improved model is working!\n")
-cat("\nKey improvements:\n")
-cat("1. Restoration control rule FIXED (more effort when degraded)\n")
-cat("2. Restoration amount no longer scales by estimate\n")
-cat("3. Budget trade-off implemented\n")
-cat("4. Decision errors tracked\n")
-cat("5. Process noise increased to", process.noise, "\n")
+cat("\n✓ Size-structured MSE model working!\n\n")
 
-# ============================================================================
-# FUNCTION: repeat.model2
-# ============================================================================
-# Runs Monte Carlo simulations with est.NPV
-# Useful for exploring parameter uncertainty and model behavior
-# ============================================================================
-
-repeat.model2 <- function(n.iters, C.start, C.lim, years, K, A, r, phi.CV,
-                          delta, process.noise, v, max.R, phi.seeds, process.seeds,
-                          c.restore = 500){  # Add c.restore parameter with default
-
-  # Calculate Cmsy for later use
-  Cmsy <- A/3 + K/3 + (A^2 - A*K + K^2)^(1/2)/3
-  C.crit <- max(A, 0.8 * Cmsy)
-  
-  # Store input phi.CV parameter before creating result vectors
-  phi.CV.input <- phi.CV
-
-  # Initialize result vectors
-  value <- rep(NA, n.iters)
-  BB <- rep(NA, n.iters)
-  TP <- rep(NA, n.iters)
-  TPCMSY <- rep(NA, n.iters)
-  dC <- rep(NA, n.iters)
-  C <- rep(NA, n.iters)
-  ES <- rep(NA, n.iters)
-  phi.CV.result <- rep(NA, n.iters)  # Renamed to avoid conflict with input parameter
-  cost.monitor <- rep(NA, n.iters)
-  NPV_minusCM <- rep(NA, n.iters)
-  pRmax <- rep(NA, n.iters)
-
-  phi.CV.seed.save <- rep(NA, n.iters)
-  thresh2 <- thresh1 <- rep(NA, n.iters)
-  rescue <- rep(NA, n.iters)
-  rescue_prob <- rep(NA, n.iters)
-  dangers <- rep(NA, n.iters)
-
-  # Run simulation n.iters times
-  for (i in 1:n.iters){
-
-    phi.CV.seed <- phi.seeds[i]
-    process.noise.seed <- process.seeds[i]
-    phi.CV.seed.save[i] <- phi.CV.seed
-
-    # Determine phi.CV values (handle both single value and separate low/high)
-    if (length(phi.CV.input) == 1) {
-      phi.CV.low <- phi.CV.high <- phi.CV.input
-    } else {
-      phi.CV.low <- phi.CV.input[1]
-      phi.CV.high <- phi.CV.input[2]
-    }
-
-    # Run single simulation
-    model.output <- est.NPV(years, K, A, r, phi.CV.low, phi.CV.high, delta,
-                            process.noise, v, C.start, C.lim, C.crit, max.R,
-                            phi.CV.seed, process.noise.seed, c.restore,
-                            use_budget_constraint = FALSE, track_errors = FALSE)
-
-    # Extract results
-    value[i] <- model.output$NPV
-    BB[i] <- model.output$BB
-    TP[i] <- model.output$TP
-    TPCMSY[i] <- model.output$TPCMSY
-    dC[i] <- median(abs(model.output$C / model.output$Chat))
-    C[i] <- mean(model.output$C)
-
-    thresh1[i] <- coral_dangerzone(C.vec = model.output$C, A = A, thresh = 0.8 * Cmsy)
-    thresh2[i] <- coral_dangerzone(C.vec = model.output$C, A = A, thresh = 0.8 * Cmsy)
-    rescue[i] <- length(which(model.output$C < 0.8 * Cmsy & model.output$C > A))
-    rescue_prob[i] <- model.output$rescue_prob
-    dangers[i] <- length(which(model.output$C > 0.8 * Cmsy))
-
-    ES[i] <- median(model.output$ES)
-    phi.CV.result[i] <- mean(model.output$phi.CV, na.rm = T)
-    cost.monitor[i] <- model.output$cost.monitor
-    NPV_minusCM[i] <- model.output$NPV - model.output$cost.monitor
-    pRmax[i] <- max(model.output$pR)
-  }
-
-  return(list(
-    value = value,
-    BB = BB,
-    TP = TP,
-    TPCMSY = TPCMSY,
-    dC = dC,
-    C = C,
-    ES = ES,
-    phi.CV = phi.CV.result,
-    cost.monitor = cost.monitor,
-    NPV_minusCM = NPV_minusCM,
-    pRmax = pRmax,
-    thresh1 = thresh1,
-    thresh2 = thresh2,
-    rescue = rescue,
-    rescue_prob = rescue_prob,
-    dangers = dangers
-  ))
-}
+cat("Key features:\n")
+cat("1. Individual colony tracking throughout simulation\n")
+cat("2. Size-dependent vital rates (survival, growth, fecundity)\n")
+cat("3. Density-dependent recruitment\n")
+cat("4. Restoration as colony outplanting (with size distribution)\n")
+cat("5. Monitoring precision affects cover estimates\n")
+cat("6. Budget trade-off implemented\n")
+cat("7. Decision errors tracked\n")
+cat("8. Size structure tracked over time\n\n")
